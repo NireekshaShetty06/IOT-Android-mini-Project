@@ -1,0 +1,150 @@
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// LCD configuration
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ESP32 pins
+#define RAIN_PIN 34
+#define BUZZER_PIN 26
+
+// Sensor calibration values
+// CHANGE THESE AFTER TESTING YOUR SENSOR
+int DRY_VALUE = 3500;
+int WET_VALUE = 1500;
+
+// Rain detection settings
+int HYSTERESIS = 100;
+
+bool rainDetected = false;
+
+// Buzzer timing
+unsigned long previousBeep = 0;
+const unsigned long beepInterval = 2000;
+const unsigned long beepDuration = 150;
+
+bool buzzerOn = false;
+unsigned long beepStarted = 0;
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // Initialize pins
+  pinMode(RAIN_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  digitalWrite(BUZZER_PIN, LOW);
+
+  analogReadResolution(12);
+
+  // Initialize I2C LCD
+  Wire.begin(21, 22);
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("SMART RAIN");
+  lcd.setCursor(0, 1);
+  lcd.print("DETECTION SYSTEM");
+
+  Serial.println("Smart Rain Detection System");
+  Serial.println("System Started!");
+
+  delay(2000);
+
+  lcd.clear();
+}
+
+void loop() {
+
+  // Read sensor multiple times
+  long total = 0;
+
+  for (int i = 0; i < 10; i++) {
+    total += analogRead(RAIN_PIN);
+    delay(10);
+  }
+
+  int rainValue = total / 10;
+
+  // Calculate threshold
+  int threshold = (DRY_VALUE + WET_VALUE) / 2;
+
+  // Determine rain condition
+  if (WET_VALUE < DRY_VALUE) {
+
+    if (!rainDetected &&
+        rainValue < threshold - HYSTERESIS) {
+      rainDetected = true;
+    }
+
+    if (rainDetected &&
+        rainValue > threshold + HYSTERESIS) {
+      rainDetected = false;
+    }
+
+  } else {
+
+    if (!rainDetected &&
+        rainValue > threshold + HYSTERESIS) {
+      rainDetected = true;
+    }
+
+    if (rainDetected &&
+        rainValue < threshold - HYSTERESIS) {
+      rainDetected = false;
+    }
+  }
+
+  // Display sensor value
+  Serial.print("Rain Sensor Value: ");
+  Serial.print(rainValue);
+
+  // LCD display
+  lcd.setCursor(0, 0);
+  lcd.print("Sensor: ");
+  lcd.print(rainValue);
+  lcd.print("    ");
+
+  if (rainDetected) {
+
+    Serial.println(" | RAIN DETECTED!");
+
+    lcd.setCursor(0, 1);
+    lcd.print("RAIN DETECTED!  ");
+
+    // Buzzer alert
+    if (!buzzerOn &&
+        millis() - previousBeep >= beepInterval) {
+
+      digitalWrite(BUZZER_PIN, HIGH);
+
+      buzzerOn = true;
+      beepStarted = millis();
+      previousBeep = millis();
+    }
+
+  } else {
+
+    Serial.println(" | NO RAIN");
+
+    lcd.setCursor(0, 1);
+    lcd.print("NO RAIN         ");
+
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerOn = false;
+  }
+
+  // Stop buzzer after short beep
+  if (buzzerOn &&
+      millis() - beepStarted >= beepDuration) {
+
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerOn = false;
+  }
+
+  delay(100);
+}
