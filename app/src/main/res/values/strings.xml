@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Smart Umbrella</string>
+    <string name="app_subtitle">IoT Rain Detection &amp; Weather Monitoring</string>
+    
+    <!-- Navigation Titles -->
+    <string name="nav_home">Home</string>
+    <string name="nav_sensors">Sensors</string>
+    <string name="nav_alerts">Alerts</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Weather Status -->
+    <string name="status_rain_detected">RAIN DETECTED</string>
+    <string name="status_no_rain">NO RAIN</string>
+    <string name="status_online">Online</string>
+    <string name="status_offline">Offline</string>
+
+    <!-- Notification Channel -->
+    <string name="channel_rain_name">Rain Alerts</string>
+    <string name="channel_rain_desc">Notifications when rainfall is detected by Smart Umbrella</string>
+</resources>
+
