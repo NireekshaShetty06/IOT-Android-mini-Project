@@ -1,6 +1,7 @@
 package com.smartumbrella.app.ui.navigation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Sensors
@@ -10,6 +11,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
     object Splash : Screen("splash", "Splash", Icons.Default.Home)
     object Home : Screen("home", "Home", Icons.Default.Home)
+    object Planner : Screen("planner", "Outing", Icons.AutoMirrored.Filled.DirectionsWalk)
     object Sensors : Screen("sensors", "Sensors", Icons.Default.Sensors)
     object Alerts : Screen("alerts", "Alerts", Icons.Default.Notifications)
     object Settings : Screen("settings", "Settings", Icons.Default.Settings)
@@ -17,6 +19,7 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
 
 val BottomNavItems = listOf(
     Screen.Home,
+    Screen.Planner,
     Screen.Sensors,
     Screen.Alerts,
     Screen.Settings

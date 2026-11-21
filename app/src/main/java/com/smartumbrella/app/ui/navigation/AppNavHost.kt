@@ -15,6 +15,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.smartumbrella.app.ui.screens.alerts.AlertHistoryScreen
 import com.smartumbrella.app.ui.screens.home.HomeScreen
+import com.smartumbrella.app.ui.screens.planner.OutingPlannerScreen
 import com.smartumbrella.app.ui.screens.sensors.SensorDetailsScreen
 import com.smartumbrella.app.ui.screens.settings.SettingsScreen
 import com.smartumbrella.app.ui.screens.splash.SplashScreen
@@ -62,7 +63,25 @@ fun AppNavHost(
             }
 
             composable(Screen.Home.route) {
-                HomeScreen(viewModel = viewModel)
+                HomeScreen(
+                    viewModel = viewModel,
+                    onNavigateToPlanner = {
+                        navController.navigate(Screen.Planner.route) {
+                            popUpTo(Screen.Home.route) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
+            }
+
+            composable(Screen.Planner.route) {
+                OutingPlannerScreen(
+                    dashboardViewModel = viewModel,
+                    onNavigateBack = {
+                        navController.popBackStack()
+                    }
+                )
             }
 
             composable(Screen.Sensors.route) {

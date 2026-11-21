@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import com.smartumbrella.app.ui.components.DeviceConnectionBadge
 import com.smartumbrella.app.ui.components.HardwareStatusCard
 import com.smartumbrella.app.ui.components.MetricCard
+import com.smartumbrella.app.ui.components.OutingPlannerCard
 import com.smartumbrella.app.ui.components.RainSensorCard
 import com.smartumbrella.app.ui.components.RainWarningBanner
 import com.smartumbrella.app.ui.components.WeatherStatusCard
@@ -60,6 +61,7 @@ import com.smartumbrella.app.viewmodel.DashboardViewModel
 @Composable
 fun HomeScreen(
     viewModel: DashboardViewModel,
+    onNavigateToPlanner: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -136,6 +138,11 @@ fun HomeScreen(
                 rainDetected = status.rainDetected,
                 lastUpdated = status.formattedLastUpdated(),
                 rainIntensity = status.rainIntensityLevel()
+            )
+
+            // Smart Outing Planner Entry Card
+            OutingPlannerCard(
+                onNavigateToPlanner = onNavigateToPlanner
             )
 
             // Temperature & Humidity Metric Cards Grid
