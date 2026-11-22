@@ -41,7 +41,13 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var previousRainState: Boolean = false
 
-    val configState: StateFlow<DeviceConfig> = firebaseRepo.configFlow
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val configState: StateFlow<DeviceConfig> = activeRepositoryFlow.flatMapLatest { it.configFlow }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = DeviceConfig()
+        )
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState: StateFlow<DashboardUiState> = activeRepositoryFlow.flatMapLatest { repo ->

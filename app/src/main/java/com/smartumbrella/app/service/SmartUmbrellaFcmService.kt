@@ -1,6 +1,7 @@
 package com.smartumbrella.app.service
 
 import android.util.Log
+import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -10,10 +11,18 @@ import com.google.firebase.messaging.RemoteMessage
  */
 class SmartUmbrellaFcmService : FirebaseMessagingService() {
 
+    private val DATABASE_URL = "https://smart-umbrella-1e4e4-default-rtdb.asia-southeast1.firebasedatabase.app"
+
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         Log.d("SmartUmbrellaFCM", "New FCM registration token: $token")
-        // Token can be registered to Firebase or ESP32 server if desired
+        // Register token in Firebase RTDB so serverless Cloud Functions can broadcast rain alerts
+        try {
+            val database = FirebaseDatabase.getInstance(DATABASE_URL)
+            database.getReference("smartUmbrella").child("fcmTokens").child(token).setValue(true)
+        } catch (e: Exception) {
+            Log.w("SmartUmbrellaFCM", "Failed to register new FCM token: ${e.message}")
+        }
     }
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
@@ -34,4 +43,3 @@ class SmartUmbrellaFcmService : FirebaseMessagingService() {
         )
     }
 }
-

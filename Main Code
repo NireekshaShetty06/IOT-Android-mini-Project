@@ -227,12 +227,4 @@ void updateLCD() {
   } else {
     lcd.print("STATUS: NO RAIN ");
   }
-}gvoid setup() {
-  // put your setup code here, to run once:
-
-}
-
-void loop() {
-  // put your main code here, to run repeatedly:
-
 }

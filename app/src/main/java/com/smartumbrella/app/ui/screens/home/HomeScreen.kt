@@ -48,6 +48,7 @@ import com.smartumbrella.app.ui.components.WeatherStatusCard
 import com.smartumbrella.app.ui.theme.NormalGreen
 import com.smartumbrella.app.ui.theme.NormalGreenBg
 import com.smartumbrella.app.ui.theme.PrimaryTeal
+import com.smartumbrella.app.ui.theme.RainRed
 import com.smartumbrella.app.ui.theme.SoftBackground
 import com.smartumbrella.app.ui.theme.SurfaceWhite
 import com.smartumbrella.app.ui.theme.TealAccent
@@ -153,6 +154,7 @@ fun HomeScreen(
                 // Temperature
                 val tempVal = status.temperature?.let { "$it" } ?: "--"
                 val tempBadge = when {
+                    !status.dhtValid -> "Sensor Error"
                     status.temperature == null -> "Waiting"
                     status.temperature > 32f -> "Warm"
                     status.temperature < 20f -> "Cool"
@@ -165,14 +167,15 @@ fun HomeScreen(
                     icon = Icons.Default.Thermostat,
                     iconTint = PrimaryTeal,
                     badgeText = tempBadge,
-                    badgeBg = PrimaryTeal.copy(alpha = 0.12f),
-                    badgeTextColor = PrimaryTeal,
+                    badgeBg = if (!status.dhtValid) RainRed.copy(alpha = 0.12f) else PrimaryTeal.copy(alpha = 0.12f),
+                    badgeTextColor = if (!status.dhtValid) RainRed else PrimaryTeal,
                     modifier = Modifier.weight(1f)
                 )
 
                 // Humidity
                 val humVal = status.humidity?.let { "$it" } ?: "--"
                 val humBadge = when {
+                    !status.dhtValid -> "Sensor Error"
                     status.humidity == null -> "Waiting"
                     status.humidity > 70f -> "Humid"
                     status.humidity < 40f -> "Dry"
@@ -185,8 +188,8 @@ fun HomeScreen(
                     icon = Icons.Default.WaterDrop,
                     iconTint = TealAccent,
                     badgeText = humBadge,
-                    badgeBg = TealAccent.copy(alpha = 0.12f),
-                    badgeTextColor = TealAccent,
+                    badgeBg = if (!status.dhtValid) RainRed.copy(alpha = 0.12f) else TealAccent.copy(alpha = 0.12f),
+                    badgeTextColor = if (!status.dhtValid) RainRed else TealAccent,
                     modifier = Modifier.weight(1f)
                 )
             }

@@ -1,220 +1,156 @@
-# Smart Umbrella IoT System & Android Application
+# Smart Umbrella - IoT Rain Detection & Weather Monitoring System
 
-[![Android](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
-[![ESP32](https://img.shields.io/badge/Hardware-ESP32-E7352C?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32)
-[![Firebase](https://img.shields.io/badge/Backend-Firebase%20RTDB-FFCA28?logo=firebase&logoColor=black)](https://firebase.google.com/)
-[![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Kotlin](https://img.shields.io/badge/Language-Kotlin%202.0-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
-
-An end-to-end Internet of Things (IoT) system and native Android application that combines real-time physical environmental sensing with predictive weather intelligence to keep users informed and prepared for rainfall.
+An end-to-end IoT and Android weather monitoring system. The system combines an **ESP32 microcontroller** with a **DHT22 temperature & humidity sensor**, **FC-37 rain sensor**, **active buzzer**, **RGB status LED**, and an **I2C LCD display**, synchronizing live telemetry to **Firebase Realtime Database** with an Android client built in **Kotlin & Jetpack Compose**.
 
 ---
 
-## Architecture Overview
+## 1. System Architecture
 
 ```
-+-------------------------------------------------------------+
-|                     ESP32 MICROCONTROLLER                   |
-|  - DHT22 (Temp & Humidity)       - Active Buzzer (GPIO 25)  |
-|  - FC-37 Rain Sensor (AO & DO)   - RGB Status LED           |
-|  - I2C 16x2 LCD Display          - Push Button (Mute)       |
-+------------------------------+------------------------------+
-                               |
-                   2.4 GHz Wi-Fi (HTTPS REST PUT)
-                   NTP Epoch Time Synchronization
-                               |
-                               v
-+-------------------------------------------------------------+
-|                 FIREBASE REALTIME DATABASE                  |
-|                 Path: /smartUmbrella/status                 |
-|       - deviceOnline     - rainDetected   - temperature     |
-|       - rainAnalogValue  - buzzerOn       - humidity        |
-|       - lastUpdated      - rgbStatus      - deviceId        |
-+------------------------------+------------------------------+
-                               |
-                     Realtime Value Listener
-                     (Any Wi-Fi or Cellular Data)
-                               |
-                               v
-+-------------------------------------------------------------+
-|                 SMART UMBRELLA ANDROID APP                  |
-|  - Jetpack Compose + Material 3 UI                          |
-|  - Real-Time Sensor Dashboard & Historical Line Charts      |
-|  - Smart Outing Planner (Open-Meteo Hourly Forecast & GPS)  |
-|  - Dual Modes: Physical Device Mode & College Demo Mode     |
-+-------------------------------------------------------------+
++----------------------------------------------------------------+
+|                        ESP32 Firmware                          |
+|  [Core 1] Sensor Sampling (40ms Rain, 2s DHT), Button & Buzzer |
+|  [Core 0] FreeRTOS Background Task: Wi-Fi, NTP & Firebase REST |
++-------------------------------+--------------------------------+
+                                | HTTPS (PATCH / PUT / GET)
+                                v
++----------------------------------------------------------------+
+|                   Firebase Realtime Database                   |
+|  - /smartUmbrella/status      Live telemetry & actuator state  |
+|  - /smartUmbrella/config      Remote thresholds & mute settings|
+|  - /smartUmbrella/history     Persistent sensor timeseries     |
+|  - /smartUmbrella/fcmTokens   Registered Android device tokens |
++-------------------------------+--------------------------------+
+                                |
+               +----------------+----------------+
+               | Realtime Sync                   | DB Trigger
+               v                                 v
++-------------------------------+ +------------------------------+
+|     Android Application       | |   Firebase Cloud Functions   |
+|  - Kotlin + Jetpack Compose   | |   - Listens on status change |
+|  - StateFlow & Heartbeat Watch| |   - Broadcasts FCM on rain   |
+|  - Outing Planner & History   | +------------------------------+
++-------------------------------+
 ```
 
 ---
 
-## Key Features
+## 2. Hardware Connections & Pinout
 
-### 1. Physical Hardware & Sensing (ESP32)
-* **Real-Time Environmental Telemetry**: Samples ambient temperature and relative humidity every 2 seconds via **DHT22**.
-* **High-Precision Rain Detection**: Evaluates analog surface conductivity (**AO**) and digital threshold (**DO**) using smart hysteresis:
-  * **Rain Alert**: Triggered when $AO < 3300$ or $DO == \text{LOW}$.
-  * **Dry Reset**: Cleared when surface is wiped dry ($AO > 3600$).
-* **Audible & Visual Alerts**:
-  * Active Buzzer pulses on GPIO 25 during rain events ($300\text{ ms ON} / 200\text{ ms OFF}$).
-  * RGB LED turns **RED** during rain and **GREEN** during dry/standby.
-* **Alert Mute Toggle**: Debounced physical push button on GPIO 32 to silence the buzzer while maintaining visual and cloud notifications.
-* **Local LCD Display**: 16x2 I2C LiquidCrystal display showing live temperature, humidity, and real-time rain status.
-* **Reliable Wi-Fi & REST Sync**:
-  * Authenticates using Firebase Email/Password REST API (`signInWithPassword`) with automatic token renewal.
-  * Synchronizes real UTC epoch timestamps via NTP (`pool.ntp.org`).
-  * Features a safe Wi-Fi reconnection state machine designed for mobile hotspot DHCP latency (avoids `E wifi:sta is connecting` errors).
+| Subsystem / Sensor | ESP32 GPIO | Electrical Specification / Details |
+|---|---|---|
+| **DHT22 (Temperature & Humidity)** | **GPIO 4** | 3.3V VCC, GND, 10k pull-up resistor on Data line |
+| **FC-37 Rain Sensor (DO)** | **GPIO 27** | Active-LOW digital output from onboard LM393 comparator |
+| **FC-37 Rain Sensor (AO)** | **GPIO 34** | Analog input (ADC1). Dry plate ~4095; Wet droplets < 3300 |
+| **Active Buzzer** | **GPIO 25** | Active HIGH drive (300ms ON / 200ms OFF alert cadence) |
+| **RGB LED (Red)** | **GPIO 18** | Common Cathode with 220Ω resistor (HIGH = ON) |
+| **RGB LED (Green)** | **GPIO 14** | Common Cathode with 220Ω resistor (HIGH = ON) |
+| **RGB LED (Blue)** | **GPIO 26** | Common Cathode with 220Ω resistor (HIGH = ON) |
+| **Mute Push Button** | **GPIO 32** | Active-LOW with internal pull-up (`INPUT_PULLUP`) |
+| **I2C LCD 16x2 (SDA)** | **GPIO 21** | 5V / 3.3V I2C Data (PCF8574 address `0x27`) |
+| **I2C LCD 16x2 (SCL)** | **GPIO 22** | I2C Clock line |
 
-### 2. Smart Umbrella Android Application
-* **Modern Jetpack Compose UI**: Built with Material 3 design principles, custom themes, dark-mode styling, and smooth state animations.
-* **Live Dashboard**:
-  * Real-time metrics for Temperature, Humidity, Rain Level, and Buzzer status.
-  * 30-second heartbeat monitor detecting online/offline ESP32 status.
-  * 30-point interactive historical line charts for environmental trends.
-  * Audio alert warnings and persistent rain alert event history.
-* **Dual Operation Modes**:
-  * **Physical Device Mode**: Streams live data directly from the physical ESP32 via Firebase Realtime Database.
-  * **College Demo / Simulation Mode**: Built-in mock data loop with manual "Trigger Rain" buttons for viva presentations when campus Wi-Fi or hardware is unavailable.
-
-### 3. Smart Outing Planner
-* **Intelligent Recommendation Engine**: Tells users whether to take an umbrella for planned outdoor trips based on real weather forecasts:
-  * `UMBRELLA_NOT_REQUIRED`: Clear/dry conditions ($<20\%$ rain probability).
-  * `CARRY_JUST_IN_CASE`: Moderate or isolated showers ($20\%\text{--}50\%$ probability or light rain).
-  * `UMBRELLA_RECOMMENDED`: High rain probability ($>50\%$), heavy rain, or storm weather codes.
-* **Location Flexibility**:
-  * One-tap GPS device location detection.
-  * Manual destination address search powered by Open-Meteo Geocoding REST API.
-* **Accurate Hourly Forecasts**:
-  * Fetches real hourly precipitation probabilities (%), rain volume (mm), and WMO weather condition codes.
-  * Robustly handles trips spanning across midnight, different dates, and timezone boundaries.
-* **Hardware Context Separation**: Displays physical umbrella status (home sensor) independently from future destination weather.
+> **Note**: Pin GPIO 34 is on ADC1 (safe for Wi-Fi use). Do NOT connect analog sensors to ADC2 pins while Wi-Fi is active.
 
 ---
 
-## Hardware Pinout (ESP32 DevKit)
+## 3. Firebase Realtime Database Structure
 
-| Component | Pin / Bus | ESP32 GPIO | Description |
-| :--- | :--- | :--- | :--- |
-| **DHT22** | DATA | `GPIO 4` | Temperature & Humidity Sensor |
-| **FC-37 Rain Sensor** | Digital Output (DO) | `GPIO 27` | Digital Rain Threshold Detection |
-| **FC-37 Rain Sensor** | Analog Output (AO) | `GPIO 34` | Raw Analog Moisture Reading (ADC1) |
-| **Active Buzzer** | Positive (+) | `GPIO 25` | Audible Rain Warning (Pulsed DC) |
-| **RGB LED** | RED | `GPIO 18` | Rain Alert Indicator |
-| **RGB LED** | GREEN | `GPIO 14` | Normal / Standby Indicator |
-| **RGB LED** | BLUE | `GPIO 26` | Status Indicator |
-| **Push Button** | Input | `GPIO 32` | Alert Mute Toggle (`INPUT_PULLUP`) |
-| **I2C LCD 16x2** | SDA | `GPIO 21` | I2C Data Line (Address `0x27`) |
-| **I2C LCD 16x2** | SCL | `GPIO 22` | I2C Clock Line (Address `0x27`) |
-
----
-
-## Firebase Realtime Database Schema
-
-Path: `/smartUmbrella/status`
-
+### `/smartUmbrella/status` (Live Telemetry)
 ```json
 {
   "deviceId": "umbrella_001",
-  "temperature": 27.4,
-  "humidity": 65.2,
-  "rainDetected": true,
-  "rainAnalogValue": 2150,
-  "rainDigitalValue": 0,
-  "buzzerOn": true,
-  "rgbStatus": "RED",
+  "temperature": 27.8,
+  "humidity": 64.2,
+  "dhtValid": true,
+  "rainDetected": false,
+  "rainAnalogValue": 3850,
+  "rainDigitalValue": 1,
+  "buzzerOn": false,
+  "rgbStatus": "GREEN",
   "deviceOnline": true,
-  "lastUpdated": 1732301845000
+  "lastUpdated": 1700000000000
 }
 ```
 
----
-
-## Project Structure
-
-```
-IOT-Android-mini-Project/
-├── app/                                    # Android Application (Kotlin, Jetpack Compose)
-│   ├── src/main/
-│   │   ├── AndroidManifest.xml             # Permissions & FCM Service Configuration
-│   │   ├── java/com/smartumbrella/app/
-│   │   │   ├── data/
-│   │   │   │   ├── engine/                 # SmartRecommendationEngine for outing planner
-│   │   │   │   ├── model/                  # Domain models (OutingPlan, Status, History)
-│   │   │   │   └── repository/             # Firebase RTDB & Open-Meteo Weather Repositories
-│   │   │   ├── service/                    # NotificationHelper & FCM Background Service
-│   │   │   ├── ui/
-│   │   │   │   ├── components/             # Reusable UI cards, charts, badges & banners
-│   │   │   │   ├── navigation/             # AppNavHost, BottomNavigationBar & NavRoutes
-│   │   │   │   ├── screens/                # Home, Planner, Sensors, Alerts, Settings
-│   │   │   │   └── theme/                  # Material 3 Color palette, Theme & Typography
-│   │   │   ├── util/                       # LocationHelper (GPS & Geocoding)
-│   │   │   ├── viewmodel/                  # DashboardViewModel & OutingPlannerViewModel
-│   │   │   └── MainActivity.kt             # Application entry point
-│   │   └── res/                            # Vector drawables, themes, and XML resources
-│   ├── build.gradle.kts                    # App-level Gradle dependencies
-│   └── google-services.json                # Firebase configuration credentials
-│
-├── firmware/                               # ESP32 IoT Microcontroller Firmware
-│   ├── SmartUmbrella_Firebase_ESP32.ino    # Unified Arduino C++ sketch
-│   └── SmartUmbrella_Firebase_ESP32/       # Arduino IDE sketch folder
-│       └── SmartUmbrella_Firebase_ESP32.ino
-│
-├── gradle/wrapper/                         # Gradle 8.9 wrapper binaries and properties
-├── build.gradle.kts                        # Root Gradle build configuration
-└── README.md                               # Project documentation
+### `/smartUmbrella/config` (Remote Configuration)
+```json
+{
+  "rainTriggerThreshold": 3300,
+  "rainClearThreshold": 3600,
+  "soundEnabled": true,
+  "notificationsEnabled": true,
+  "lastConfigUpdated": 1700000000000
+}
 ```
 
+### `/smartUmbrella/history/{timestamp}` (Timeseries Records)
+```json
+{
+  "timestamp": 1700000000000,
+  "temperature": 27.8,
+  "humidity": 64.2,
+  "rainAnalogValue": 3850
+}
+```
+
+### Recommended Database Security Rules
+```json
+{
+  "rules": {
+    "smartUmbrella": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}
+```
+*Android connects using anonymous authentication (`FirebaseAuth.getInstance().signInAnonymously()`), satisfying `auth != null` without hardcoding credentials.*
+
 ---
 
-## Getting Started
+## 4. Software Setup & Build Instructions
 
-### 1. Prerequisites
-* **Android Studio**: Ladybug / Koala or newer with JDK 17 or 21.
-* **Arduino IDE**: Version 2.0+ with **ESP32 by Espressif** board package (v3.0+).
-* **Required Arduino Libraries**:
-  * `LiquidCrystal I2C` (by Frank de Brabander)
-  * `DHT sensor library` (by Adafruit)
-  * `Adafruit Unified Sensor`
-
-### 2. Microcontroller Setup (ESP32)
-1. Open `firmware/SmartUmbrella_Firebase_ESP32/SmartUmbrella_Firebase_ESP32.ino` in Arduino IDE.
-2. Update your credentials at the top of the file:
-   ```cpp
-   const char* WIFI_SSID              = "YOUR_2.4GHZ_WIFI_NAME";
-   const char* WIFI_PASSWORD          = "YOUR_WIFI_PASSWORD";
-   const char* FIREBASE_USER_EMAIL    = "your_user@example.com";
-   const char* FIREBASE_USER_PASSWORD = "your_secure_password";
+### Android Application
+1. **Requirements**: Android Studio Meerkat or newer, JDK 21 (configured in `gradle.properties`).
+2. **Build debug APK**:
+   ```powershell
+   .\gradlew.bat assembleDebug
    ```
-   > [!IMPORTANT]
-   > Ensure your Wi-Fi router or phone mobile hotspot is set to the **2.4 GHz band** (ESP32 hardware does not support 5 GHz Wi-Fi).
-3. Connect your ESP32 board via USB, select **Tools > Board > ESP32 Dev Module**, choose your COM port, and click **Upload**.
-4. Open **Tools > Serial Monitor** (`115200` baud) to verify the boot beep, Wi-Fi connection, NTP time sync, and initial Firebase telemetry push.
+3. **Run Unit Tests**:
+   ```powershell
+   .\gradlew.bat testDebugUnitTest
+   ```
 
-### 3. Android App Setup
-1. Clone the repository:
+### ESP32 Firmware
+1. **Canonical Sketch**: Located at `firmware/SmartUmbrella_Firebase_ESP32/SmartUmbrella_Firebase_ESP32.ino`.
+2. **Arduino IDE / CLI Settings**:
+   - Board: `ESP32 Dev Module` or `ESP32-WROOM-DA`
+   - Upload Speed: `921600`
+   - CPU Frequency: `240MHz`
+   - Core Debug Level: `None` or `Info`
+3. **Required Libraries**:
+   - `LiquidCrystal I2C` (by Frank de Brabander)
+   - `DHT sensor library` (by Adafruit)
+   - `Adafruit Unified Sensor`
+4. **Compile Command (via Arduino CLI)**:
+   ```powershell
+   arduino-cli compile --fqbn esp32:esp32:esp32da firmware\SmartUmbrella_Firebase_ESP32\SmartUmbrella_Firebase_ESP32.ino
+   ```
+
+### Serverless Cloud Functions (Optional for Background Push Notifications)
+To receive alerts when the Android app is closed:
+1. Navigate to `functions/`:
    ```bash
-   git clone https://github.com/NireekshaShetty06/IOT-Android-mini-Project.git
+   cd functions
+   npm install
+   firebase deploy --only functions
    ```
-2. Open the project in **Android Studio**.
-3. Let Gradle sync automatically (configured with Gradle 8.9 and Android Gradle Plugin 8.7.3).
-4. Run the app on a physical Android device or emulator:
-   ```bash
-   ./gradlew assembleDebug
-   ```
-5. Navigate to **Settings** in the app to switch between **Physical Device Mode** (reads live ESP32 data) and **Simulation Mode** (demo/testing mode).
 
 ---
 
-## Tech Stack
-
-* **Mobile**: Kotlin 2.0, Jetpack Compose, Material 3, Navigation Compose, Coroutines, StateFlow, Retrofit2, OkHttp3.
-* **Cloud & Backend**: Firebase Realtime Database, Firebase Authentication (REST API), Firebase Cloud Messaging.
-* **APIs**: Open-Meteo Hourly Weather Forecast API, Open-Meteo Geocoding API.
-* **Firmware / Hardware**: Arduino C++, ESP32 (Xtensa 32-bit LX6), FreeRTOS, HTTPClient, WiFiClientSecure, NTP Time.
-
----
-
-## Contributors
-
-* **Aishwarya Jain**
-* **Nireeksha Shetty**
-* **Vishesh**
+## 5. Repository Structure Notes
+- `firmware/SmartUmbrella_Firebase_ESP32.ino`: Canonical ESP32 firmware.
+- `firmware/SmartUmbrella_Firebase_ESP32/`: Arduino IDE sketch folder containing canonical `.ino`.
+- `Main Code`: Legacy sketch with duplicated/malformed content (deprecated; do not use as source of truth).
+- `Rain Sensor`: Legacy standalone test sketch for the rain module (kept for standalone reference).

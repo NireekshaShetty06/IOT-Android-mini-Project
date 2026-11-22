@@ -18,13 +18,21 @@ data class UmbrellaStatus(
     val buzzerOn: Boolean = false,
     val rgbStatus: String = "GREEN",
     val deviceOnline: Boolean = false,
-    val lastUpdated: Long = 0L
+    val lastUpdated: Long = 0L,
+    val dhtValid: Boolean = true
 ) {
+    /**
+     * Constant for heartbeat staleness timeout (15s = 5 missed ESP32 3s sync cycles).
+     */
+    companion object {
+        const val DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000L
+    }
+
     /**
      * Determines whether data is stale based on heartbeat timeout.
      * Prevents displaying "Online" when ESP32 has disconnected or stopped transmitting.
      */
-    fun isDataStale(timeoutMillis: Long = 30_000L): Boolean {
+    fun isDataStale(timeoutMillis: Long = DEFAULT_HEARTBEAT_TIMEOUT_MS): Boolean {
         if (lastUpdated <= 0L) return true
         val currentTime = System.currentTimeMillis()
         return (currentTime - lastUpdated) > timeoutMillis
@@ -33,7 +41,7 @@ data class UmbrellaStatus(
     /**
      * Effective online status factoring in both ESP32 flag and timestamp freshness.
      */
-    fun isEffectivelyOnline(timeoutMillis: Long = 30_000L): Boolean {
+    fun isEffectivelyOnline(timeoutMillis: Long = DEFAULT_HEARTBEAT_TIMEOUT_MS): Boolean {
         return deviceOnline && !isDataStale(timeoutMillis)
     }
 

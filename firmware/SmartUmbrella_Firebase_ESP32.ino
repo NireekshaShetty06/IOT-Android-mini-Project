@@ -1,30 +1,23 @@
 /*
  * =====================================================================================
  * SMART UMBRELLA - FINAL UNIFIED ESP32 FIRMWARE
- * Built from original tested hardware baseline + Firebase REST + NTP Time Synchronization
+ * Built from original tested hardware baseline + FreeRTOS Network Task + Firebase REST
  * =====================================================================================
  * Hardware Pinout:
  * - DHT22 Sensor:       GPIO 4
- * - Rain Sensor (DO):   GPIO 27
- * - Rain Sensor (AO):   GPIO 34
- * - Active Buzzer:      GPIO 25
+ * - Rain Sensor (DO):   GPIO 27 (Active-LOW digital output from LM393)
+ * - Rain Sensor (AO):   GPIO 34 (Analog input: Dry ~4095, Wet < 3300)
+ * - Active Buzzer:      GPIO 25 (Active HIGH drive)
  * - RGB LED (Red):      GPIO 18
  * - RGB LED (Green):    GPIO 14
  * - RGB LED (Blue):     GPIO 26
  * - Push Button:        GPIO 32 (Mute toggle, Internal Pullup)
  * - I2C LCD 16x2:       SDA -> GPIO 21, SCL -> GPIO 22 (0x27)
  *
- * Firebase Realtime Database (/smartUmbrella/status):
- * - deviceId: "umbrella_001" (String)
- * - temperature: float
- * - humidity: float
- * - rainDetected: boolean
- * - rainAnalogValue: int
- * - rainDigitalValue: int
- * - buzzerOn: boolean
- * - rgbStatus: string ("GREEN", "RED", "BLUE", "OFF")
- * - deviceOnline: boolean
- * - lastUpdated: Unix epoch milliseconds (from NTP)
+ * Firebase Realtime Database:
+ * - Telemetry:   /smartUmbrella/status
+ * - Config:      /smartUmbrella/config
+ * - History:     /smartUmbrella/history
  * =====================================================================================
  */
 
@@ -76,11 +69,12 @@ const char* NTP_SERVER_2            = "time.google.com";
 #define PIN_BUTTON       32
 
 // =====================================================================================
-// 3. BALANCED SENSITIVITY THRESHOLDS (EXACT MATCH)
+// 3. BALANCED SENSITIVITY THRESHOLDS (SAFE DEFAULTS + REMOTE OVERRIDE)
 // =====================================================================================
 // Dry is ~4095. Droplets drop it to 2500-3200. Wiped dry goes to 3600+.
-const int RAIN_TRIGGER_THRESHOLD = 3300; 
-const int RAIN_CLEAR_THRESHOLD   = 3600;
+int rainTriggerThreshold = 3300; 
+int rainClearThreshold   = 3600;
+bool remoteSoundEnabled  = true;
 
 const bool IS_COMMON_ANODE = false;
 
@@ -93,6 +87,8 @@ DHT dht(PIN_DHT, DHTTYPE);
 // =====================================================================================
 float currentTemp = 0.0;
 float currentHumidity = 0.0;
+bool isDhtValid = false;
+
 int rainRawValue = 4095;
 int digitalRain = 1;
 bool isRaining = false;
@@ -101,7 +97,7 @@ bool isAlertMuted = false;
 // RGB State String for Firebase
 String currentRgbStatus = "GREEN";
 
-// Hardware Timing
+// Hardware Timing (Core 1)
 unsigned long lastDHTReadTime = 0;
 const unsigned long dhtInterval = 2000;
 
@@ -116,30 +112,45 @@ int buttonState = HIGH;
 unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50;
 
-// Firebase Periodic Sync Timing
-unsigned long lastFirebaseSync = 0;
-const unsigned long firebaseSyncInterval = 3000; // Periodic sync every 3s
+// FreeRTOS Thread-Safe Telemetry Transfer Structure
+struct TelemetrySnapshot {
+  float temperature;
+  float humidity;
+  bool dhtValid;
+  bool isRaining;
+  int rainRawValue;
+  int digitalRain;
+  bool buzzerOn;
+  char rgbStatus[8];
+};
 
-// Network & Safe Wi-Fi State Machine Variables
+TelemetrySnapshot sharedTelemetry;
+SemaphoreHandle_t telemetryMutex = NULL;
+SemaphoreHandle_t telemetryNotifySem = NULL;
+
+// Network State Variables (Owned exclusively by Core 0 network task)
 bool wasWifiConnected = false;
 bool isWifiConnecting = false;
 unsigned long wifiConnectStartTime = 0;
-const unsigned long wifiConnectTimeout = 20000; // 20s window for DHCP lease from phone hotspot
+const unsigned long wifiConnectTimeout = 20000; // 20s window
 unsigned long lastWifiRetryTime = 0;
-const unsigned long wifiRetryInterval = 15000;  // 15s cooldown between new connection attempts
+const unsigned long wifiRetryInterval = 15000;  // 15s cooldown
 
 bool isTimeSynchronized = false;
 unsigned long lastNtpRetryTime = 0;
-const unsigned long ntpRetryInterval = 10000; // NTP clock retry every 10s
+const unsigned long ntpRetryInterval = 10000;
 
 String firebaseIdToken = "";
 unsigned long tokenAcquiredTime = 0;
 unsigned long tokenExpiresInSec = 3600;
 unsigned long lastAuthAttemptTime = 0;
-const unsigned long authRetryInterval = 10000; // Firebase auth retry every 10s
+const unsigned long authRetryInterval = 10000;
+
+unsigned long lastSuccessfulHeartbeatTime = 0;
+unsigned long lastConfigFetchTime = 0;
 
 // =====================================================================================
-// 5. HARDWARE CONTROL FUNCTIONS (ORIGINAL TESTED CODE)
+// 5. HARDWARE CONTROL FUNCTIONS
 // =====================================================================================
 void setLEDColor(bool r, bool g, bool b) {
   if (IS_COMMON_ANODE) {
@@ -160,11 +171,17 @@ void setLEDColor(bool r, bool g, bool b) {
 void updateLCD() {
   lcd.setCursor(0, 0);
   lcd.print("T:");
-  lcd.print((int)currentTemp);
-  lcd.print((char)223);
-  lcd.print("C H:");
-  lcd.print((int)currentHumidity);
-  lcd.print("%    ");
+  if (isDhtValid) {
+    lcd.print((int)currentTemp);
+    lcd.print((char)223);
+    lcd.print("C H:");
+    lcd.print((int)currentHumidity);
+    lcd.print("%    ");
+  } else {
+    lcd.print("--");
+    lcd.print((char)223);
+    lcd.print("C H:--%    ");
+  }
 
   lcd.setCursor(0, 1);
   if (isRaining) {
@@ -179,7 +196,7 @@ void updateLCD() {
 }
 
 // =====================================================================================
-// 6. NTP TIME SYNCHRONIZATION
+// 6. NTP TIME SYNCHRONIZATION (Non-blocking, Core 0)
 // =====================================================================================
 bool checkTimeSync() {
   struct timeval tv;
@@ -196,18 +213,10 @@ bool checkTimeSync() {
   return false;
 }
 
-void initNtpTime() {
-  Serial.print("[NTP] Initializing NTP time synchronization...");
+void initNtpTimeNonBlocking() {
+  Serial.println("[NTP] Initializing background NTP time synchronization...");
   configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
-  int attempts = 0;
-  while (!checkTimeSync() && attempts < 15) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-  if (!isTimeSynchronized) {
-    Serial.println("\n[NTP] Time sync will continue in background.");
-  }
+  checkTimeSync();
 }
 
 unsigned long long getEpochMillis() {
@@ -226,17 +235,16 @@ String uint64ToString(unsigned long long value) {
 }
 
 // =====================================================================================
-// 7. FIREBASE AUTHENTICATION (EMAIL & PASSWORD REST API)
+// 7. FIREBASE AUTHENTICATION (EMAIL & PASSWORD REST API, Core 0)
 // =====================================================================================
 bool authenticateFirebase() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Auth] Cannot authenticate: Wi-Fi not connected.");
     return false;
   }
 
   Serial.println("[Auth] Authenticating with Firebase using Email/Password...");
   WiFiClientSecure client;
-  client.setInsecure();
+  client.setInsecure(); // Maintainable TLS endpoint connection
   HTTPClient http;
 
   String authUrl = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + String(FIREBASE_API_KEY);
@@ -249,6 +257,7 @@ bool authenticateFirebase() {
   if (httpCode == 200) {
     String response = http.getString();
 
+    // Canonical reviewed JSON offsets:
     int tokenKeyIdx = response.indexOf("\"idToken\": \"");
     int tokenStart = 0;
     if (tokenKeyIdx != -1) {
@@ -279,9 +288,6 @@ bool authenticateFirebase() {
         }
 
         Serial.println("[Auth] Authentication SUCCESS! ID token acquired.");
-        Serial.print("[Auth] Token expires in: ");
-        Serial.print(tokenExpiresInSec);
-        Serial.println(" seconds.");
         http.end();
         client.stop();
         return true;
@@ -291,11 +297,6 @@ bool authenticateFirebase() {
 
   Serial.print("[Auth] Authentication FAILED. HTTP Code: ");
   Serial.println(httpCode);
-  if (httpCode > 0) {
-    Serial.println("[Auth] Response: " + http.getString());
-  } else {
-    Serial.println("[Auth] Error: " + http.errorToString(httpCode));
-  }
   http.end();
   client.stop();
   return false;
@@ -307,7 +308,6 @@ bool ensureFirebaseAuth(unsigned long now) {
   if (firebaseIdToken.length() == 0) {
     if (now - lastAuthAttemptTime >= authRetryInterval) {
       lastAuthAttemptTime = now;
-      Serial.println("[Auth] No active token. Retrying Firebase authentication...");
       return authenticateFirebase();
     }
     return false;
@@ -315,7 +315,7 @@ bool ensureFirebaseAuth(unsigned long now) {
 
   unsigned long tokenAgeSec = (now - tokenAcquiredTime) / 1000;
   if (tokenAgeSec >= (tokenExpiresInSec - 300)) {
-    Serial.println("[Auth] Firebase ID token nearing expiration. Refreshing...");
+    Serial.println("[Auth] Token nearing expiration. Refreshing...");
     return authenticateFirebase();
   }
 
@@ -323,34 +323,26 @@ bool ensureFirebaseAuth(unsigned long now) {
 }
 
 // =====================================================================================
-// 8. TELEMETRY UPLOAD (PUT REST API)
+// 8. TELEMETRY UPLOAD & REMOTE CONFIG (PATCH REST API, Core 0)
 // =====================================================================================
-void pushTelemetryToFirebase() {
-  if (WiFi.status() != WL_CONNECTED) {
-    return;
-  }
-
-  unsigned long now = millis();
-  if (!ensureFirebaseAuth(now)) {
-    return;
-  }
+void pushTelemetryHttp(const TelemetrySnapshot& snap) {
+  if (WiFi.status() != WL_CONNECTED) return;
 
   unsigned long long epoch = getEpochMillis();
-  if (epoch == 0ULL) {
-    return; // Wait for NTP synchronization
-  }
+  if (epoch == 0ULL) return; // Wait for NTP synchronization
 
   String epochStr = uint64ToString(epoch);
 
   String jsonPayload = "{";
   jsonPayload += "\"deviceId\":\"umbrella_001\",";
-  jsonPayload += "\"temperature\":" + String(currentTemp, 1) + ",";
-  jsonPayload += "\"humidity\":" + String(currentHumidity, 1) + ",";
-  jsonPayload += "\"rainDetected\":" + String(isRaining ? "true" : "false") + ",";
-  jsonPayload += "\"rainAnalogValue\":" + String(rainRawValue) + ",";
-  jsonPayload += "\"rainDigitalValue\":" + String(digitalRain) + ",";
-  jsonPayload += "\"buzzerOn\":" + String(buzzerState ? "true" : "false") + ",";
-  jsonPayload += "\"rgbStatus\":\"" + currentRgbStatus + "\",";
+  jsonPayload += "\"temperature\":" + String(snap.temperature, 1) + ",";
+  jsonPayload += "\"humidity\":" + String(snap.humidity, 1) + ",";
+  jsonPayload += "\"dhtValid\":" + String(snap.dhtValid ? "true" : "false") + ",";
+  jsonPayload += "\"rainDetected\":" + String(snap.isRaining ? "true" : "false") + ",";
+  jsonPayload += "\"rainAnalogValue\":" + String(snap.rainRawValue) + ",";
+  jsonPayload += "\"rainDigitalValue\":" + String(snap.digitalRain) + ",";
+  jsonPayload += "\"buzzerOn\":" + String(snap.buzzerOn ? "true" : "false") + ",";
+  jsonPayload += "\"rgbStatus\":\"" + String(snap.rgbStatus) + "\",";
   jsonPayload += "\"deviceOnline\":true,";
   jsonPayload += "\"lastUpdated\":" + epochStr;
   jsonPayload += "}";
@@ -359,102 +351,183 @@ void pushTelemetryToFirebase() {
   client.setInsecure();
   HTTPClient http;
 
+  // Use PATCH to update status properties cleanly without erasing potential sibling keys
   String url = String(FIREBASE_HOST) + "/smartUmbrella/status.json?auth=" + firebaseIdToken;
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
 
-  int httpCode = http.PUT(jsonPayload);
+  int httpCode = http.sendRequest("PATCH", jsonPayload);
 
   if (httpCode == 200) {
-    Serial.println("[Firebase] Telemetry pushed (HTTP 200 OK) | LastUpdated: " + epochStr);
+    lastSuccessfulHeartbeatTime = millis();
+    Serial.println("[Firebase] Telemetry synced (HTTP 200 OK) | LastUpdated: " + epochStr);
   } else if (httpCode == 401) {
-    Serial.println("[Firebase] Upload 401 Unauthorized. Refreshing token...");
+    Serial.println("[Firebase] 401 Unauthorized. Renewing token.");
     firebaseIdToken = "";
-    authenticateFirebase();
   } else {
-    Serial.print("[Firebase] Upload failed. HTTP Code: ");
+    Serial.print("[Firebase] Telemetry push returned HTTP Code: ");
     Serial.println(httpCode);
   }
   http.end();
   client.stop();
-
-  // If the buzzer was active, refresh lastBuzzerToggle so network delay doesn't swallow buzzer cadence
-  if (buzzerState) {
-    lastBuzzerToggle = millis();
-  }
 }
 
-// =====================================================================================
-// 9. NETWORK SERVICES WATCHDOG (SAFE WI-FI RECONNECTION STATE MACHINE)
-// =====================================================================================
-void maintainNetworkServices(unsigned long now) {
-  wl_status_t status = WiFi.status();
+void fetchRemoteConfigHttp() {
+  if (WiFi.status() != WL_CONNECTED || firebaseIdToken.length() == 0) return;
 
-  if (status == WL_CONNECTED) {
-    isWifiConnecting = false;
-    if (!wasWifiConnected) {
-      wasWifiConnected = true;
-      Serial.println("\n[WiFi] Connection established! IP: " + WiFi.localIP().toString());
-      lcd.setCursor(0, 0);
-      lcd.print("WIFI CONNECTED  ");
-      initNtpTime();
-      authenticateFirebase();
-      updateLCD();
-    }
-  } else {
-    // If active connection was lost
-    if (wasWifiConnected) {
-      wasWifiConnected = false;
-      isTimeSynchronized = false;
-      firebaseIdToken = "";
-      Serial.println("\n[WiFi] Connection lost.");
-      lastWifiRetryTime = now;
-      isWifiConnecting = false;
-    }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
 
-    // If an existing connection attempt is still running
-    if (isWifiConnecting) {
-      if (now - wifiConnectStartTime >= wifiConnectTimeout) {
-        Serial.println("\n[WiFi] Connection attempt timed out.");
-        isWifiConnecting = false;
-        lastWifiRetryTime = now; // Start cooldown before retrying
-      } else {
-        // Handshake/DHCP lease currently in progress: DO NOT call WiFi.begin() or WiFi.disconnect()
-        return;
-      }
-    } else {
-      // Cooldown check before initiating a new connection attempt
-      if (now - lastWifiRetryTime >= wifiRetryInterval) {
-        // Never call begin if the driver is already idle or associating
-        if (status != WL_IDLE_STATUS) {
-          lastWifiRetryTime = now;
-          wifiConnectStartTime = now;
-          isWifiConnecting = true;
-          Serial.print("[WiFi] Initiating connection attempt to ");
-          Serial.println(WIFI_SSID);
-          WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  String url = String(FIREBASE_HOST) + "/smartUmbrella/config.json?auth=" + firebaseIdToken;
+  http.begin(client, url);
+
+  int httpCode = http.GET();
+  if (httpCode == 200) {
+    String payload = http.getString();
+    
+    // Parse rainTriggerThreshold
+    int trigIdx = payload.indexOf("\"rainTriggerThreshold\":");
+    if (trigIdx != -1) {
+      int valStart = trigIdx + 23;
+      int valEnd = payload.indexOf(",", valStart);
+      if (valEnd == -1) valEnd = payload.indexOf("}", valStart);
+      if (valEnd != -1) {
+        int parsed = payload.substring(valStart, valEnd).toInt();
+        if (parsed >= 1000 && parsed <= 4000) {
+          rainTriggerThreshold = parsed;
         }
       }
     }
-    return;
-  }
 
-  // NTP synchronization check
-  if (!isTimeSynchronized) {
-    if (now - lastNtpRetryTime >= ntpRetryInterval) {
-      lastNtpRetryTime = now;
-      Serial.println("[NTP] Retrying clock sync...");
-      configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
-      checkTimeSync();
+    // Parse rainClearThreshold
+    int clearIdx = payload.indexOf("\"rainClearThreshold\":");
+    if (clearIdx != -1) {
+      int valStart = clearIdx + 21;
+      int valEnd = payload.indexOf(",", valStart);
+      if (valEnd == -1) valEnd = payload.indexOf("}", valStart);
+      if (valEnd != -1) {
+        int parsed = payload.substring(valStart, valEnd).toInt();
+        if (parsed > rainTriggerThreshold && parsed <= 4095) {
+          rainClearThreshold = parsed;
+        }
+      }
     }
-  }
 
-  // Firebase auth check / token renewal
-  ensureFirebaseAuth(now);
+    // Parse soundEnabled
+    int soundIdx = payload.indexOf("\"soundEnabled\":");
+    if (soundIdx != -1) {
+      int valStart = soundIdx + 15;
+      if (payload.substring(valStart, valStart + 4) == "true") {
+        remoteSoundEnabled = true;
+      } else if (payload.substring(valStart, valStart + 5) == "false") {
+        remoteSoundEnabled = false;
+      }
+    }
+
+    Serial.println("[Config] Remote config fetched. Trigger: " + String(rainTriggerThreshold) + 
+                   " | Clear: " + String(rainClearThreshold) + 
+                   " | SoundEnabled: " + String(remoteSoundEnabled ? "YES" : "NO"));
+  }
+  http.end();
+  client.stop();
 }
 
 // =====================================================================================
-// 10. SETUP
+// 9. FREERTOS BACKGROUND NETWORK TASK (CORE 0)
+// =====================================================================================
+void networkWorkerTask(void* pvParameters) {
+  Serial.println("[FreeRTOS] Background Network Task running on Core 0");
+
+  WiFi.mode(WIFI_STA);
+  Serial.print("[WiFi] Initiating connection to ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  isWifiConnecting = true;
+  wifiConnectStartTime = millis();
+
+  while (true) {
+    unsigned long now = millis();
+    wl_status_t status = WiFi.status();
+
+    if (status == WL_CONNECTED) {
+      isWifiConnecting = false;
+      if (!wasWifiConnected) {
+        wasWifiConnected = true;
+        Serial.println("\n[WiFi] Connected successfully! IP: " + WiFi.localIP().toString());
+        initNtpTimeNonBlocking();
+        authenticateFirebase();
+        fetchRemoteConfigHttp();
+      }
+    } else {
+      if (wasWifiConnected) {
+        wasWifiConnected = false;
+        isTimeSynchronized = false;
+        firebaseIdToken = "";
+        Serial.println("\n[WiFi] Connection lost. Entering cooldown.");
+        lastWifiRetryTime = now;
+        isWifiConnecting = false;
+      }
+
+      if (isWifiConnecting) {
+        if (now - wifiConnectStartTime >= wifiConnectTimeout) {
+          Serial.println("\n[WiFi] Connection attempt timed out.");
+          isWifiConnecting = false;
+          lastWifiRetryTime = now;
+        }
+      } else {
+        if (now - lastWifiRetryTime >= wifiRetryInterval) {
+          if (status != WL_IDLE_STATUS) {
+            lastWifiRetryTime = now;
+            wifiConnectStartTime = now;
+            isWifiConnecting = true;
+            Serial.print("[WiFi] Re-initiating connection to ");
+            Serial.println(WIFI_SSID);
+            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+          }
+        }
+      }
+    }
+
+    // Maintain NTP
+    if (WiFi.status() == WL_CONNECTED && !isTimeSynchronized) {
+      if (now - lastNtpRetryTime >= ntpRetryInterval) {
+        lastNtpRetryTime = now;
+        configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
+        checkTimeSync();
+      }
+    }
+
+    // Maintain Auth
+    if (WiFi.status() == WL_CONNECTED) {
+      ensureFirebaseAuth(now);
+    }
+
+    // Wait for immediate telemetry notification or periodic heartbeat (every 3s)
+    if (xSemaphoreTake(telemetryNotifySem, pdMS_TO_TICKS(500)) == pdTRUE || 
+        (now - lastSuccessfulHeartbeatTime >= 3000)) {
+      if (WiFi.status() == WL_CONNECTED && isTimeSynchronized && ensureFirebaseAuth(now)) {
+        TelemetrySnapshot snap;
+        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          snap = sharedTelemetry;
+          xSemaphoreGive(telemetryMutex);
+          pushTelemetryHttp(snap);
+        }
+      }
+    }
+
+    // Periodic remote config fetch (every 60s)
+    if (now - lastConfigFetchTime >= 60000) {
+      lastConfigFetchTime = now;
+      fetchRemoteConfigHttp();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+// =====================================================================================
+// 10. SETUP (CORE 1)
 // =====================================================================================
 void setup() {
   Serial.begin(115200);
@@ -462,7 +535,7 @@ void setup() {
 
   Serial.println("\n==========================================");
   Serial.println("  SMART UMBRELLA - BALANCED SENSITIVITY   ");
-  Serial.println("  Hardware Baseline + Firebase Telemetry  ");
+  Serial.println("  FreeRTOS Non-Blocking + Firebase Sync   ");
   Serial.println("==========================================");
 
   pinMode(PIN_RAIN_DO, INPUT);
@@ -489,7 +562,7 @@ void setup() {
   lcd.setCursor(2, 1);
   lcd.print("READY TO TEST");
 
-  // Exact confirmation beep from working original code (Immediate feedback):
+  // Immediate confirmation beep on boot
   digitalWrite(PIN_BUZZER, HIGH);
   delay(120);
   digitalWrite(PIN_BUZZER, LOW);
@@ -498,52 +571,42 @@ void setup() {
   delay(1000);
   lcd.clear();
 
-  // Connect to Wi-Fi safely (Station Mode, single begin call)
-  WiFi.mode(WIFI_STA);
-  Serial.print("[WiFi] Connecting to ");
-  Serial.println(WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  isWifiConnecting = true;
-  wifiConnectStartTime = millis();
+  // Create FreeRTOS synchronization primitives
+  telemetryMutex = xSemaphoreCreateMutex();
+  telemetryNotifySem = xSemaphoreCreateBinary();
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 25) {
-    delay(400);
-    Serial.print(".");
-    attempts++;
-  }
+  // Initialize shared telemetry state
+  sharedTelemetry.temperature = 0.0;
+  sharedTelemetry.humidity = 0.0;
+  sharedTelemetry.dhtValid = false;
+  sharedTelemetry.isRaining = false;
+  sharedTelemetry.rainRawValue = 4095;
+  sharedTelemetry.digitalRain = 1;
+  sharedTelemetry.buzzerOn = false;
+  strncpy(sharedTelemetry.rgbStatus, "GREEN", sizeof(sharedTelemetry.rgbStatus));
 
-  if (WiFi.status() == WL_CONNECTED) {
-    wasWifiConnected = true;
-    isWifiConnecting = false;
-    Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
-    lcd.setCursor(0, 0);
-    lcd.print("WIFI CONNECTED  ");
-    lcd.setCursor(0, 1);
-    lcd.print("INITIALIZING... ");
-    initNtpTime();
-    authenticateFirebase();
-    delay(500);
-    lcd.clear();
-  } else {
-    wasWifiConnected = false;
-    Serial.println("\n[WiFi] Handshake in progress; continuing connection in background.");
-  }
+  // Spawn background network task pinned to Core 0
+  xTaskCreatePinnedToCore(
+    networkWorkerTask,
+    "NetworkTask",
+    8192,
+    NULL,
+    1,
+    NULL,
+    0
+  );
 
   updateLCD();
-  Serial.println(">> Watching live sensor values...\n");
+  Serial.println(">> Watching live sensor values on Core 1...\n");
 }
 
 // =====================================================================================
-// 11. LOOP (PRESERVES EXACT HARDWARE EXECUTION SPEED)
+// 11. MAIN LOOP (CORE 1 - 100% UNINTERRUPTED EXECUTION SPEED)
 // =====================================================================================
 void loop() {
   unsigned long now = millis();
 
-  // 1. Maintain background Wi-Fi and Firebase services
-  maintainNetworkServices(now);
-
-  // 2. PUSH BUTTON CHECK (ORIGINAL LOGIC)
+  // 1. PUSH BUTTON CHECK (50ms debounce)
   int reading = digitalRead(PIN_BUTTON);
   if (reading != lastButtonReading) {
     lastDebounceTime = now;
@@ -563,7 +626,7 @@ void loop() {
   }
   lastButtonReading = reading;
 
-  // 3. LIVE RAIN CHECK WITH SMART HYSTERESIS (ORIGINAL LOGIC)
+  // 2. LIVE RAIN CHECK WITH SMART HYSTERESIS
   if (now - lastRainCheckTime >= rainCheckInterval) {
     lastRainCheckTime = now;
 
@@ -572,28 +635,26 @@ void loop() {
 
     bool previousRainState = isRaining;
 
-    // Trigger rain when water drops arrive:
-    if (!isRaining && (digitalRain == LOW || rainRawValue < RAIN_TRIGGER_THRESHOLD)) {
+    // Trigger rain when water drops arrive (< rainTriggerThreshold or DO == LOW):
+    if (!isRaining && (digitalRain == LOW || rainRawValue < rainTriggerThreshold)) {
       isRaining = true;
     }
-    // Clear rain only when wiped dry:
-    else if (isRaining && (digitalRain == HIGH && rainRawValue > RAIN_CLEAR_THRESHOLD)) {
+    // Clear rain only when wiped dry (> rainClearThreshold and DO == HIGH):
+    else if (isRaining && (digitalRain == HIGH && rainRawValue > rainClearThreshold)) {
       isRaining = false;
     }
 
-    // STATE TRANSITIONS (ORIGINAL LOGIC)
+    // STATE TRANSITIONS
     if (isRaining != previousRainState) {
       if (isRaining) {
-        // RAIN DETECTED: Instant Red LED + Buzzer!
         setLEDColor(true, false, false);
-        if (!isAlertMuted) {
+        if (!isAlertMuted && remoteSoundEnabled) {
           digitalWrite(PIN_BUZZER, HIGH);
           buzzerState = true;
           lastBuzzerToggle = now;
         }
         Serial.println("\n*** RAIN EVENT DETECTED! AO Value: " + String(rainRawValue) + " ***");
       } else {
-        // DRY: Instant silence + Green LED!
         digitalWrite(PIN_BUZZER, LOW);
         buzzerState = false;
         setLEDColor(false, true, false);
@@ -601,12 +662,25 @@ void loop() {
         Serial.println("\n*** PLATE DRY! AO Value: " + String(rainRawValue) + " ***");
       }
       updateLCD();
-      pushTelemetryToFirebase(); // Send immediate rain transition alert to Android App
+
+      // Trigger immediate background telemetry upload without blocking loop
+      if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        sharedTelemetry.temperature = currentTemp;
+        sharedTelemetry.humidity = currentHumidity;
+        sharedTelemetry.dhtValid = isDhtValid;
+        sharedTelemetry.isRaining = isRaining;
+        sharedTelemetry.rainRawValue = rainRawValue;
+        sharedTelemetry.digitalRain = digitalRain;
+        sharedTelemetry.buzzerOn = buzzerState;
+        strncpy(sharedTelemetry.rgbStatus, currentRgbStatus.c_str(), sizeof(sharedTelemetry.rgbStatus));
+        xSemaphoreGive(telemetryMutex);
+        xSemaphoreGive(telemetryNotifySem);
+      }
     }
   }
 
-  // 4. BUZZER CADENCE (300ms ON, 200ms OFF) (ORIGINAL LOGIC)
-  if (isRaining && !isAlertMuted) {
+  // 3. BUZZER CADENCE (300ms ON, 200ms OFF) - Uninterrupted by Wi-Fi/Network
+  if (isRaining && !isAlertMuted && remoteSoundEnabled) {
     if (buzzerState && (now - lastBuzzerToggle >= 300)) {
       digitalWrite(PIN_BUZZER, LOW);
       buzzerState = false;
@@ -623,7 +697,7 @@ void loop() {
     }
   }
 
-  // 5. PERIODIC DHT22 TELEMETRY (Every 2s) (ORIGINAL LOGIC)
+  // 4. PERIODIC DHT22 SAMPLING (Every 2s)
   if (now - lastDHTReadTime >= dhtInterval) {
     lastDHTReadTime = now;
 
@@ -633,19 +707,34 @@ void loop() {
     if (!isnan(t) && !isnan(h)) {
       currentTemp = t;
       currentHumidity = h;
+      isDhtValid = true;
+    } else {
+      isDhtValid = false;
+      Serial.println("[DHT] Warning: Invalid sensor reading from DHT22.");
     }
 
-    Serial.print("T: "); Serial.print(currentTemp, 1);
-    Serial.print(" C | H: "); Serial.print(currentHumidity, 1);
+    Serial.print("T: "); 
+    if (isDhtValid) Serial.print(currentTemp, 1); else Serial.print("--");
+    Serial.print(" C | H: "); 
+    if (isDhtValid) Serial.print(currentHumidity, 1); else Serial.print("--");
     Serial.print(" % | Live Rain AO: "); Serial.print(rainRawValue);
     Serial.print(" | Status: "); Serial.println(isRaining ? "RAIN DETECTED!" : "NO RAIN");
 
     updateLCD();
+
+    // Refresh shared telemetry state for periodic background heartbeat
+    if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      sharedTelemetry.temperature = currentTemp;
+      sharedTelemetry.humidity = currentHumidity;
+      sharedTelemetry.dhtValid = isDhtValid;
+      sharedTelemetry.isRaining = isRaining;
+      sharedTelemetry.rainRawValue = rainRawValue;
+      sharedTelemetry.digitalRain = digitalRain;
+      sharedTelemetry.buzzerOn = buzzerState;
+      strncpy(sharedTelemetry.rgbStatus, currentRgbStatus.c_str(), sizeof(sharedTelemetry.rgbStatus));
+      xSemaphoreGive(telemetryMutex);
+    }
   }
 
-  // 6. PERIODIC FIREBASE HEARTBEAT (Every 3s)
-  if (now - lastFirebaseSync >= firebaseSyncInterval) {
-    lastFirebaseSync = now;
-    pushTelemetryToFirebase();
-  }
+  delay(5); // Small yield for RTOS IDLE task
 }
