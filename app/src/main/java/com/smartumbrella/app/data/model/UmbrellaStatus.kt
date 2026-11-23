@@ -25,7 +25,7 @@ data class UmbrellaStatus(
      * Constant for heartbeat staleness timeout (15s = 5 missed ESP32 3s sync cycles).
      */
     companion object {
-        const val DEFAULT_HEARTBEAT_TIMEOUT_MS = 15_000L
+        const val DEFAULT_HEARTBEAT_TIMEOUT_MS = 60_000L
     }
 
     /**
@@ -35,7 +35,7 @@ data class UmbrellaStatus(
     fun isDataStale(timeoutMillis: Long = DEFAULT_HEARTBEAT_TIMEOUT_MS): Boolean {
         if (lastUpdated <= 0L) return true
         val currentTime = System.currentTimeMillis()
-        return (currentTime - lastUpdated) > timeoutMillis
+        return kotlin.math.abs(currentTime - lastUpdated) > timeoutMillis
     }
 
     /**

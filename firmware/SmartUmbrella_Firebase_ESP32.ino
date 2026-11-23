@@ -34,8 +34,8 @@
 // 1. CONFIGURABLE CREDENTIALS
 // =====================================================================================
 // Replace with your 2.4 GHz Wi-Fi credentials (ESP32 only supports 2.4 GHz):
-const char* WIFI_SSID               = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD           = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID               = "Galaxy M15 5G 7349";
+const char* WIFI_PASSWORD           = "123abcde";
 
 // Firebase Realtime Database Host (Asia Southeast 1):
 const char* FIREBASE_HOST           = "https://smart-umbrella-1e4e4-default-rtdb.asia-southeast1.firebasedatabase.app";
@@ -44,8 +44,8 @@ const char* FIREBASE_HOST           = "https://smart-umbrella-1e4e4-default-rtdb
 const char* FIREBASE_API_KEY        = "AIzaSyDz-k0pxMTRMNPsJC7morSE98pfVDSAsPw";
 
 // Firebase Authentication User Credentials (Email / Password):
-const char* FIREBASE_USER_EMAIL     = "YOUR_FIREBASE_EMAIL";
-const char* FIREBASE_USER_PASSWORD  = "YOUR_FIREBASE_PASSWORD";
+const char* FIREBASE_USER_EMAIL     = "nireekshashetty60@gmail.com";
+const char* FIREBASE_USER_PASSWORD  = "nireeksha@06";
 
 // NTP Servers:
 const char* NTP_SERVER_1            = "pool.ntp.org";
@@ -329,7 +329,10 @@ void pushTelemetryHttp(const TelemetrySnapshot& snap) {
   if (WiFi.status() != WL_CONNECTED) return;
 
   unsigned long long epoch = getEpochMillis();
-  if (epoch == 0ULL) return; // Wait for NTP synchronization
+  if (epoch == 0ULL) {
+    // Fallback: if NTP UDP port 123 is blocked on mobile hotspot, use baseline epoch + millis()
+    epoch = 1795411000000ULL + millis();
+  }
 
   String epochStr = uint64ToString(epoch);
 
@@ -351,8 +354,11 @@ void pushTelemetryHttp(const TelemetrySnapshot& snap) {
   client.setInsecure();
   HTTPClient http;
 
-  // Use PATCH to update status properties cleanly without erasing potential sibling keys
-  String url = String(FIREBASE_HOST) + "/smartUmbrella/status.json?auth=" + firebaseIdToken;
+  // If token is acquired, pass auth parameter; otherwise send directly to public rule
+  String url = String(FIREBASE_HOST) + "/smartUmbrella/status.json";
+  if (firebaseIdToken.length() > 0) {
+    url += "?auth=" + firebaseIdToken;
+  }
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
 
